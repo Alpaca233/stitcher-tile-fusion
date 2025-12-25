@@ -406,12 +406,15 @@ class FusionWorker(QThread):
     finished = pyqtSignal(str, float)  # output_path, elapsed_time
     error = pyqtSignal(str)
 
-    def __init__(self, tiff_path, do_registration, blend_pixels, downsample_factor):
+    def __init__(
+        self, tiff_path, do_registration, blend_pixels, downsample_factor, fusion_mode="blended"
+    ):
         super().__init__()
         self.tiff_path = tiff_path
         self.do_registration = do_registration
         self.blend_pixels = blend_pixels
         self.downsample_factor = downsample_factor
+        self.fusion_mode = fusion_mode
         self.output_path = None
 
     def run(self):
@@ -493,8 +496,9 @@ class FusionWorker(QThread):
             tf._create_fused_tensorstore(output_path=scale0)
 
             # Fuse tiles
-            self.progress.emit("Fusing tiles...")
-            tf._fuse_tiles()
+            mode_label = "direct placement" if self.fusion_mode == "direct" else "blended"
+            self.progress.emit(f"Fusing tiles ({mode_label})...")
+            tf._fuse_tiles(mode=self.fusion_mode)
             fuse_time = time.time() - step_start
             self.progress.emit(f"Tiles fused [{fuse_time:.1f}s]")
 
@@ -837,14 +841,17 @@ class StitcherGUI(QMainWindow):
         if self.blend_checkbox.isChecked():
             blend_val = self.blend_spin.value()
             blend_pixels = (blend_val, blend_val)
+            fusion_mode = "blended"
         else:
             blend_pixels = (0, 0)
+            fusion_mode = "direct"
 
         self.worker = FusionWorker(
             self.drop_area.file_path,
             self.registration_checkbox.isChecked(),
             blend_pixels,
             self.downsample_spin.value(),
+            fusion_mode,
         )
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.on_fusion_finished)

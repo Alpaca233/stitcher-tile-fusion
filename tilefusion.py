@@ -920,19 +920,100 @@ class TileFusion:
 
         self.fused_ts = ts.open(config, create=True, open=True).result()
 
-    def _fuse_tiles(self, chunked: bool = True, ram_fraction: float = 0.4) -> None:
-        """Fuse all tiles using weighted blending.
+    def _fuse_tiles(
+        self, mode: str = "blended", chunked: bool = True, ram_fraction: float = 0.4
+    ) -> None:
+        """Fuse all tiles into output.
 
         Parameters
         ----------
+        mode : str
+            Fusion mode: "blended" (weighted averaging, high quality) or
+            "direct" (simple placement, ~5-10x faster but visible seams).
         chunked : bool
             If True, use memory-efficient chunked processing. Default True.
         ram_fraction : float
             Fraction of available RAM to use for block processing. Default 0.4.
         """
+        if mode == "direct":
+            return self._fuse_tiles_direct()
         if chunked:
             return self._fuse_tiles_chunked(ram_fraction)
         return self._fuse_tiles_full()
+
+    def _fuse_tiles_direct(self) -> None:
+        """Fuse tiles using direct placement (fast mode, no blending).
+
+        This is ~5-10x faster than blended mode but produces visible seams
+        at tile boundaries if there are intensity variations between tiles.
+        Tiles are simply placed at their positions, with later tiles
+        overwriting earlier ones in overlap regions.
+        """
+        import psutil
+
+        offsets = [
+            (
+                int((y - self.offset[0]) / self._pixel_size[0]),
+                int((x - self.offset[1]) / self._pixel_size[1]),
+            )
+            for (y, x) in self._tile_positions
+        ]
+        pad_Y, pad_X = self.padded_shape
+
+        # Check if we can fit in memory
+        available_ram = psutil.virtual_memory().available
+        output_bytes = pad_Y * pad_X * self.channels * 2  # uint16
+        use_memory = output_bytes < 0.45 * available_ram
+
+        if use_memory:
+            print(f"Direct mode: using in-memory buffer ({output_bytes / 1e9:.2f} GB)")
+            # Process all channels at once in memory
+            output = np.zeros((1, self.channels, pad_Y, pad_X), dtype=np.uint16)
+
+            for t_idx in trange(len(offsets), desc="placing tiles", leave=True):
+                oy, ox = offsets[t_idx]
+                tile_all = self._read_tile(t_idx)  # (C, Y, X)
+
+                # Calculate valid output region
+                y_end = min(oy + self.Y, pad_Y)
+                x_end = min(ox + self.X, pad_X)
+                tile_h = y_end - oy
+                tile_w = x_end - ox
+
+                if tile_h > 0 and tile_w > 0:
+                    output[0, :, oy:y_end, ox:x_end] = tile_all[:, :tile_h, :tile_w]
+
+            # Write to TensorStore
+            print("Writing to disk...")
+            self.fused_ts[:].write(output).result()
+            del output
+        else:
+            print(f"Direct mode: writing directly to disk (output {output_bytes / 1e9:.2f} GB)")
+            # Process channel by channel to reduce memory
+            for c in range(self.channels):
+                channel_buf = np.zeros((1, 1, pad_Y, pad_X), dtype=np.uint16)
+
+                for t_idx in trange(len(offsets), desc=f"ch{c} placing", leave=True):
+                    oy, ox = offsets[t_idx]
+                    tile_all = self._read_tile(t_idx)
+
+                    if tile_all.shape[0] > 1:
+                        tile = tile_all[c : c + 1]
+                    else:
+                        tile = tile_all
+
+                    y_end = min(oy + self.Y, pad_Y)
+                    x_end = min(ox + self.X, pad_X)
+                    tile_h = y_end - oy
+                    tile_w = x_end - ox
+
+                    if tile_h > 0 and tile_w > 0:
+                        channel_buf[0, 0, oy:y_end, ox:x_end] = tile[0, :tile_h, :tile_w]
+
+                self.fused_ts[0, c : c + 1, :, :].write(channel_buf).result()
+                del channel_buf
+
+        gc.collect()
 
     def _fuse_tiles_full(self) -> None:
         """Fuse all tiles using full-image accumulator (legacy mode)."""

@@ -29,6 +29,7 @@ try:
     from opm_processing.imageprocessing.ssim_cuda import (
         structural_similarity_cupy_sep_shared as ssim_cuda,
     )
+
     xp = cp
     USING_GPU = True
 except Exception:
@@ -39,6 +40,7 @@ except Exception:
     from skimage.registration import phase_cross_correlation
     from scipy.ndimage import shift as _shift_cpu
     from skimage.metrics import structural_similarity as _ssim_cpu
+
     xp = np
     USING_GPU = False
 
@@ -52,7 +54,7 @@ def _shift_array(arr: Any, shift_vec: Any) -> Any:
 
 def _ssim(arr1: Any, arr2: Any, win_size: int) -> float:
     """SSIM wrapper that routes to GPU kernel or CPU skimage."""
-    if USING_GPU and 'ssim_cuda' in globals():
+    if USING_GPU and "ssim_cuda" in globals():
         return float(ssim_cuda(arr1, arr2, win_size=win_size))
     arr1_np = np.asarray(arr1)
     arr2_np = np.asarray(arr2)
@@ -215,7 +217,11 @@ class TileFusion:
         threshold: float = 0.5,
         multiscale_factors: Sequence[int] = (2, 4, 8, 16),
         resolution_multiples: Sequence[Union[int, Sequence[int]]] = (
-            (1, 1), (2, 2), (4, 4), (8, 8), (16, 16)
+            (1, 1),
+            (2, 2),
+            (4, 4),
+            (8, 8),
+            (16, 16),
         ),
         max_workers: int = 8,
         debug: bool = False,
@@ -227,7 +233,11 @@ class TileFusion:
         if not self.tiff_path.exists():
             raise FileNotFoundError(f"Path not found: {self.tiff_path}")
 
-        self.output_path = Path(output_path) if output_path else self.tiff_path.parent / f"{self.tiff_path.stem}_fused.ome.zarr"
+        self.output_path = (
+            Path(output_path)
+            if output_path
+            else self.tiff_path.parent / f"{self.tiff_path.stem}_fused.ome.zarr"
+        )
 
         # Detect format: folder (SQUID) vs file (OME-TIFF)
         self._is_squid_format = self.tiff_path.is_dir()
@@ -241,8 +251,7 @@ class TileFusion:
         self.threshold = float(threshold)
         self.multiscale_factors = tuple(multiscale_factors)
         self.resolution_multiples = [
-            r if hasattr(r, "__len__") else (r, r)
-            for r in resolution_multiples
+            r if hasattr(r, "__len__") else (r, r) for r in resolution_multiples
         ]
         self._max_workers = int(max_workers)
         self._debug = bool(debug)
@@ -272,8 +281,8 @@ class TileFusion:
                 raise ValueError("TIFF file does not contain OME metadata")
 
             root = ET.fromstring(tif.ome_metadata)
-            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
-            images = root.findall('.//ome:Image', ns)
+            ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
+            images = root.findall(".//ome:Image", ns)
 
             self.n_tiles = len(images)
             self.n_series = len(tif.series)
@@ -284,19 +293,19 @@ class TileFusion:
             self.time_dim = 1
             self.position_dim = self.n_tiles
 
-            first_pixels = images[0].find('ome:Pixels', ns)
-            px_x = float(first_pixels.get('PhysicalSizeX', 1.0))
-            px_y = float(first_pixels.get('PhysicalSizeY', 1.0))
+            first_pixels = images[0].find("ome:Pixels", ns)
+            px_x = float(first_pixels.get("PhysicalSizeX", 1.0))
+            px_y = float(first_pixels.get("PhysicalSizeY", 1.0))
             self._pixel_size = (px_y, px_x)
 
             self._tile_positions = []
             for img in images:
-                pixels = img.find('ome:Pixels', ns)
-                planes = pixels.findall('ome:Plane', ns)
+                pixels = img.find("ome:Pixels", ns)
+                planes = pixels.findall("ome:Plane", ns)
                 if planes:
                     p = planes[0]
-                    x = float(p.get('PositionX', 0))
-                    y = float(p.get('PositionY', 0))
+                    x = float(p.get("PositionX", 0))
+                    y = float(p.get("PositionY", 0))
                     self._tile_positions.append((y, x))
                 else:
                     self._tile_positions.append((0.0, 0.0))
@@ -305,76 +314,76 @@ class TileFusion:
         """Load metadata from SQUID folder format (individual TIFFs + coordinates.csv)."""
         import pandas as pd
         import json
-        
+
         # Find the subfolder containing images (usually "0" for single z-level)
         subfolders = [d for d in self.tiff_path.iterdir() if d.is_dir()]
         if subfolders:
             self._squid_image_folder = subfolders[0]
         else:
             self._squid_image_folder = self.tiff_path
-        
+
         # Load coordinates from the subfolder's coordinates.csv
         coords_path = self._squid_image_folder / "coordinates.csv"
         if not coords_path.exists():
             coords_path = self.tiff_path / "coordinates.csv"
         if not coords_path.exists():
             raise FileNotFoundError(f"coordinates.csv not found in {self.tiff_path}")
-        
+
         self._squid_coords = pd.read_csv(coords_path)
         self.n_tiles = len(self._squid_coords)
         self.n_series = self.n_tiles
-        
+
         # Get list of channels from TIFF filenames
         tiff_files = list(self._squid_image_folder.glob("*.tiff"))
         if not tiff_files:
             tiff_files = list(self._squid_image_folder.glob("*.tif"))
-        
+
         # Extract unique channel names (e.g., "Fluorescence_405_nm_Ex")
         channel_names = set()
         for f in tiff_files:
             # Pattern: manual_{fov}_{z}_Fluorescence_{wavelength}.tiff
-            parts = f.stem.split('_')
+            parts = f.stem.split("_")
             if len(parts) >= 4:
-                channel_name = '_'.join(parts[3:])  # e.g., "Fluorescence_405_nm_Ex"
+                channel_name = "_".join(parts[3:])  # e.g., "Fluorescence_405_nm_Ex"
                 channel_names.add(channel_name)
-        
+
         self._squid_channels = sorted(channel_names)
         self.channels = len(self._squid_channels)
         self.time_dim = 1
         self.position_dim = self.n_tiles
-        
+
         # Read first image to get dimensions
-        first_fov = self._squid_coords['fov'].iloc[0]
+        first_fov = self._squid_coords["fov"].iloc[0]
         first_channel = self._squid_channels[0]
         first_img_path = self._squid_image_folder / f"manual_{first_fov}_0_{first_channel}.tiff"
         if not first_img_path.exists():
             first_img_path = self._squid_image_folder / f"manual_{first_fov}_0_{first_channel}.tif"
-        
+
         first_img = tifffile.imread(first_img_path)
         self.Y, self.X = first_img.shape[-2:]
-        
+
         # Load pixel size from acquisition parameters
         params_path = self.tiff_path / "acquisition parameters.json"
         if params_path.exists():
             with open(params_path) as f:
                 params = json.load(f)
-            magnification = params.get('objective', {}).get('magnification', 10.0)
-            sensor_pixel_um = params.get('sensor_pixel_size_um', 7.52)
+            magnification = params.get("objective", {}).get("magnification", 10.0)
+            sensor_pixel_um = params.get("sensor_pixel_size_um", 7.52)
             pixel_size_um = sensor_pixel_um / magnification
         else:
             pixel_size_um = 0.752  # Default for 10x
-        
+
         self._pixel_size = (pixel_size_um, pixel_size_um)
-        
+
         # Convert mm coordinates to µm and store as (y, x)
         self._tile_positions = []
         for _, row in self._squid_coords.iterrows():
-            x_um = row['x (mm)'] * 1000
-            y_um = row['y (mm)'] * 1000
+            x_um = row["x (mm)"] * 1000
+            y_um = row["y (mm)"] * 1000
             self._tile_positions.append((y_um, x_um))
-        
+
         # Store FOV indices for reading tiles
-        self._squid_fov_indices = self._squid_coords['fov'].tolist()
+        self._squid_fov_indices = self._squid_coords["fov"].tolist()
 
     @property
     def tile_positions(self) -> List[Tuple[float, float]]:
@@ -477,7 +486,7 @@ class TileFusion:
     def _read_squid_tile_all_channels(self, tile_idx: int) -> np.ndarray:
         """Read all channels of a tile from SQUID folder format."""
         fov = self._squid_fov_indices[tile_idx]
-        
+
         channels = []
         for channel_name in self._squid_channels:
             img_path = self._squid_image_folder / f"manual_{fov}_0_{channel_name}.tiff"
@@ -485,7 +494,7 @@ class TileFusion:
                 img_path = self._squid_image_folder / f"manual_{fov}_0_{channel_name}.tif"
             arr = tifffile.imread(img_path)
             channels.append(arr)
-        
+
         # Stack channels: (C, Y, X)
         stacked = np.stack(channels, axis=0)
         return stacked.astype(np.float32)
@@ -494,14 +503,14 @@ class TileFusion:
         """Read a single channel of a tile from SQUID folder format."""
         if channel_idx is None:
             channel_idx = self.channel_to_use
-        
+
         fov = self._squid_fov_indices[tile_idx]
         channel_name = self._squid_channels[channel_idx]
-        
+
         img_path = self._squid_image_folder / f"manual_{fov}_0_{channel_name}.tiff"
         if not img_path.exists():
             img_path = self._squid_image_folder / f"manual_{fov}_0_{channel_name}.tif"
-        
+
         arr = tifffile.imread(img_path)
         if arr.ndim == 2:
             arr = arr[np.newaxis, :, :]
@@ -578,7 +587,7 @@ class TileFusion:
         downsample_factors: Tuple[int, int] = None,
         ssim_window: int = None,
         ch_idx: int = 0,
-        threshold: float = None
+        threshold: float = None,
     ) -> None:
         """
         Detect and score overlaps between neighboring tile pairs via cross-correlation.
@@ -612,25 +621,26 @@ class TileFusion:
         min_overlap = 15  # At least 15 pixels overlap needed
         for i_pos in range(n_pos):
             for j_pos in range(i_pos + 1, n_pos):
-                phys = (np.array(self._tile_positions[j_pos]) -
-                        np.array(self._tile_positions[i_pos]))
+                phys = np.array(self._tile_positions[j_pos]) - np.array(self._tile_positions[i_pos])
                 vox_off = np.round(phys / np.array(self._pixel_size)).astype(int)
                 dy, dx = vox_off
 
                 overlap_y = self.Y - abs(dy)
                 overlap_x = self.X - abs(dx)
-                
+
                 # Check if tiles are adjacent (one dimension has full overlap, other has partial)
-                is_horizontal_neighbor = (abs(dy) < min_overlap and overlap_x >= min_overlap)
-                is_vertical_neighbor = (abs(dx) < min_overlap and overlap_y >= min_overlap)
-                
+                is_horizontal_neighbor = abs(dy) < min_overlap and overlap_x >= min_overlap
+                is_vertical_neighbor = abs(dx) < min_overlap and overlap_y >= min_overlap
+
                 if is_horizontal_neighbor or is_vertical_neighbor:
                     adjacent_pairs.append((i_pos, j_pos, dy, dx, overlap_y, overlap_x))
-        
+
         if self._debug:
             print(f"Found {len(adjacent_pairs)} adjacent tile pairs to register")
 
-        for i_pos, j_pos, dy, dx, overlap_y, overlap_x in tqdm(adjacent_pairs, desc="register", leave=True):
+        for i_pos, j_pos, dy, dx, overlap_y, overlap_x in tqdm(
+            adjacent_pairs, desc="register", leave=True
+        ):
             bounds_i_y = (max(0, dy), min(self.Y, self.Y + dy))
             bounds_i_x = (max(0, dx), min(self.X, self.X + dx))
             bounds_j_y = (max(0, -dy), min(self.Y, self.Y - dy))
@@ -679,7 +689,9 @@ class TileFusion:
 
             if abs(dy_s) > max_shift[0] or abs(dx_s) > max_shift[1]:
                 if self._debug:
-                    print(f"Dropping link {(i_pos, j_pos)} shift=({dy_s}, {dx_s}) - exceeds max {max_shift}")
+                    print(
+                        f"Dropping link {(i_pos, j_pos)} shift=({dy_s}, {dx_s}) - exceeds max {max_shift}"
+                    )
                 continue
 
             self.pairwise_metrics[(i_pos, j_pos)] = (dy_s, dx_s, round(score, 3))
@@ -688,9 +700,7 @@ class TileFusion:
 
     @staticmethod
     def _solve_global(
-        links: List[Dict[str, Any]],
-        n_tiles: int,
-        fixed_indices: List[int]
+        links: List[Dict[str, Any]], n_tiles: int, fixed_indices: List[int]
     ) -> np.ndarray:
         """
         Solve a linear least-squares for all 2 axes at once,
@@ -703,8 +713,8 @@ class TileFusion:
             b = np.zeros(m, dtype=np.float64)
             row = 0
             for link in links:
-                i, j = link['i'], link['j']
-                t, w = link['t'][axis], link['w']
+                i, j = link["i"], link["j"]
+                t, w = link["t"][axis], link["w"]
                 A[row, j] = w
                 A[row, i] = -w
                 b[row] = w * t
@@ -724,7 +734,7 @@ class TileFusion:
         fixed_indices: List[int],
         rel_thresh: float,
         abs_thresh: float,
-        iterative: bool
+        iterative: bool,
     ) -> np.ndarray:
         """
         Perform two-round (or iterative two-round) robust optimization:
@@ -736,10 +746,7 @@ class TileFusion:
         shifts = self._solve_global(links, n_tiles, fixed_indices)
 
         def compute_res(ls: List[Dict[str, Any]], sh: np.ndarray) -> np.ndarray:
-            return np.array([
-                np.linalg.norm(sh[l['j']] - sh[l['i']] - l['t'])
-                for l in ls
-            ])
+            return np.array([np.linalg.norm(sh[l["j"]] - sh[l["i"]] - l["t"]) for l in ls])
 
         work = links.copy()
         res = compute_res(work, shifts)
@@ -770,10 +777,10 @@ class TileFusion:
 
     def optimize_shifts(
         self,
-        method: str = 'ONE_ROUND',
+        method: str = "ONE_ROUND",
         rel_thresh: float = 0.3,
         abs_thresh: float = 5.0,
-        iterative: bool = False
+        iterative: bool = False,
     ) -> None:
         """
         Globally optimize tile shifts using either:
@@ -793,12 +800,9 @@ class TileFusion:
         """
         links: List[Dict[str, Any]] = []
         for (i, j), v in self.pairwise_metrics.items():
-            links.append({
-                'i': i,
-                'j': j,
-                't': np.array(v[:2], dtype=np.float64),
-                'w': np.sqrt(v[2])
-            })
+            links.append(
+                {"i": i, "j": j, "t": np.array(v[:2], dtype=np.float64), "w": np.sqrt(v[2])}
+            )
         if not links:
             self.global_offsets = np.zeros((self.position_dim, 2), dtype=np.float64)
             return
@@ -806,16 +810,11 @@ class TileFusion:
         n = len(self._tile_positions)
         fixed = [0]
 
-        if method == 'ONE_ROUND':
+        if method == "ONE_ROUND":
             d_opt = self._solve_global(links, n, fixed)
-        elif method.startswith('TWO_ROUND'):
+        elif method.startswith("TWO_ROUND"):
             d_opt = self._two_round_opt(
-                links,
-                n,
-                fixed,
-                rel_thresh,
-                abs_thresh,
-                method.endswith('ITERATIVE')
+                links, n, fixed, rel_thresh, abs_thresh, method.endswith("ITERATIVE")
             )
         else:
             raise ValueError(f"Unknown method {method}")
@@ -825,8 +824,7 @@ class TileFusion:
     def save_pairwise_metrics(self, filepath: Union[str, Path]) -> None:
         """Save pairwise_metrics to a JSON file."""
         path = Path(filepath)
-        out = {f"{i},{j}": list(v)
-               for (i, j), v in self.pairwise_metrics.items()}
+        out = {f"{i},{j}": list(v) for (i, j), v in self.pairwise_metrics.items()}
         with open(path, "w") as f:
             json.dump(out, f)
 
@@ -835,10 +833,7 @@ class TileFusion:
         path = Path(filepath)
         with open(path, "r") as f:
             data = json.load(f)
-        self.pairwise_metrics = {
-            tuple(map(int, k.split(","))): tuple(v)
-            for k, v in data.items()
-        }
+        self.pairwise_metrics = {tuple(map(int, k.split(","))): tuple(v) for k, v in data.items()}
 
     def _compute_fused_image_space(self) -> None:
         """Compute fused image physical shape and offset based on tile positions."""
@@ -852,10 +847,7 @@ class TileFusion:
 
         self.unpadded_shape = (sy, sx)
         self.offset = (min_y, min_x)
-        self.center = (
-            (max_x - min_x) / 2,
-            (max_y - min_y) / 2
-        )
+        self.center = ((max_x - min_x) / 2, (max_y - min_y) / 2)
 
     def _pad_to_chunk_multiple(self) -> None:
         """Pad unpadded_shape to exact multiples of chunk shape."""
@@ -895,36 +887,35 @@ class TileFusion:
             "kvstore": {"driver": "file", "path": str(out)},
             "metadata": {
                 "shape": full_shape,
-                "chunk_grid": {
-                    "name": "regular",
-                    "configuration": {"chunk_shape": shard_chunk}
-                },
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": shard_chunk}},
                 "chunk_key_encoding": {"name": "default"},
-                "codecs": [{
-                    "name": "sharding_indexed",
-                    "configuration": {
-                        "chunk_shape": codec_chunk,
-                        "codecs": [
-                            {"name": "bytes",
-                             "configuration": {"endian": "little"}},
-                            {"name": "blosc",
-                             "configuration": {
-                                 "cname": "zstd",
-                                 "clevel": 5,
-                                 "shuffle": "bitshuffle"
-                             }}
-                        ],
-                        "index_codecs": [
-                            {"name": "bytes",
-                             "configuration": {"endian": "little"}},
-                            {"name": "crc32c"}
-                        ],
-                        "index_location": "end"
+                "codecs": [
+                    {
+                        "name": "sharding_indexed",
+                        "configuration": {
+                            "chunk_shape": codec_chunk,
+                            "codecs": [
+                                {"name": "bytes", "configuration": {"endian": "little"}},
+                                {
+                                    "name": "blosc",
+                                    "configuration": {
+                                        "cname": "zstd",
+                                        "clevel": 5,
+                                        "shuffle": "bitshuffle",
+                                    },
+                                },
+                            ],
+                            "index_codecs": [
+                                {"name": "bytes", "configuration": {"endian": "little"}},
+                                {"name": "crc32c"},
+                            ],
+                            "index_location": "end",
+                        },
                     }
-                }],
+                ],
                 "data_type": "uint16",
-                "dimension_names": ["t", "c", "y", "x"]
-            }
+                "dimension_names": ["t", "c", "y", "x"],
+            },
         }
 
         self.fused_ts = ts.open(config, create=True, open=True).result()
@@ -934,7 +925,7 @@ class TileFusion:
         offsets = [
             (
                 int((y - self.offset[0]) / self._pixel_size[0]),
-                int((x - self.offset[1]) / self._pixel_size[1])
+                int((x - self.offset[1]) / self._pixel_size[1]),
             )
             for (y, x) in self._tile_positions
         ]
@@ -947,10 +938,10 @@ class TileFusion:
             for t_idx in trange(len(offsets), desc="fusing", leave=True):
                 oy, ox = offsets[t_idx]
                 tile_all = self._read_tile(t_idx)
-                
+
                 # Extract the current channel
                 if tile_all.shape[0] > 1:
-                    tile = tile_all[c:c+1, :, :]  # (1, Y, X)
+                    tile = tile_all[c : c + 1, :, :]  # (1, Y, X)
                 else:
                     tile = tile_all  # Single channel, use as-is
 
@@ -958,18 +949,12 @@ class TileFusion:
                 wx = self.x_profile
                 w2d = wy[:, None] * wx[None, :]
 
-                _accumulate_tile_shard(
-                    fused_block, weight_sum,
-                    tile, w2d,
-                    oy, ox
-                )
+                _accumulate_tile_shard(fused_block, weight_sum, tile, w2d, oy, ox)
 
             _normalize_shard(fused_block, weight_sum)
-            self.fused_ts[
-                0, slice(c, c + 1),
-                slice(0, pad_Y),
-                slice(0, pad_X)
-            ].write(fused_block.astype(np.uint16)).result()
+            self.fused_ts[0, slice(c, c + 1), slice(0, pad_Y), slice(0, pad_X)].write(
+                fused_block.astype(np.uint16)
+            ).result()
 
             del fused_block, weight_sum
             gc.collect()
@@ -998,13 +983,11 @@ class TileFusion:
             if inp is not None:
                 del inp
             prev = omezarr_path / f"scale{idx}" / "image"
-            inp = ts.open({
-                "driver": "zarr3",
-                "kvstore": {"driver": "file", "path": str(prev)}
-            }).result()
+            inp = ts.open(
+                {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(prev)}}
+            ).result()
 
-            factor_to_use = (factors[idx] // factors[idx - 1]
-                             if idx > 0 else factors[0])
+            factor_to_use = factors[idx] // factors[idx - 1] if idx > 0 else factors[0]
             _, _, Y, X = inp.shape
             new_y, new_x = Y // factor_to_use, X // factor_to_use
 
@@ -1016,7 +999,7 @@ class TileFusion:
 
             self._create_fused_tensorstore(output_path=out_path)
 
-            for y0 in trange(0, new_y, chunk_y, desc=f'scale{idx + 1}', leave=True):
+            for y0 in trange(0, new_y, chunk_y, desc=f"scale{idx + 1}", leave=True):
                 by = min(chunk_y, new_y - y0)
                 in_y0 = y0 * factor_to_use
                 in_y1 = min(Y, (y0 + by) * factor_to_use)
@@ -1032,13 +1015,13 @@ class TileFusion:
                         arr = xp.asarray(slab)
                         block = (1, 1, factor_to_use, factor_to_use)
                         down_arr = block_reduce(arr, block_size=block, func=xp.mean)
-                        down = cp.asnumpy(down_arr) if USING_GPU and cp is not None else np.asarray(down_arr)
+                        down = (
+                            cp.asnumpy(down_arr)
+                            if USING_GPU and cp is not None
+                            else np.asarray(down_arr)
+                        )
                     down = down.astype(slab.dtype, copy=False)
-                    self.fused_ts[
-                        :, :,
-                        y0:y0 + by,
-                        x0:x0 + bx
-                    ].write(down).result()
+                    self.fused_ts[:, :, y0 : y0 + by, x0 : x0 + bx].write(down).result()
 
             ngff = {
                 "attributes": {"_ARRAY_DIMENSIONS": ["t", "c", "y", "x"]},
@@ -1054,7 +1037,7 @@ class TileFusion:
         omezarr_path: Path,
         resolution_multiples: Sequence[Union[int, Sequence[int]]],
         dataset_name: str = "image",
-        version: str = "0.5"
+        version: str = "0.5",
     ) -> None:
         """
         Write OME-NGFF v0.5 multiscales JSON for Zarr3.
@@ -1076,10 +1059,7 @@ class TileFusion:
             {"name": "y", "type": "space"},
             {"name": "x", "type": "space"},
         ]
-        norm_res = [
-            tuple(r) if hasattr(r, "__len__") else (r, r)
-            for r in resolution_multiples
-        ]
+        norm_res = [tuple(r) if hasattr(r, "__len__") else (r, r) for r in resolution_multiples]
         base_scale = [1.0, 1.0] + [float(s) for s in self._pixel_size]
         trans = [0.0, 0.0] + list(self.center)
 
@@ -1094,16 +1074,20 @@ class TileFusion:
                 translation = [
                     0.0,
                     0.0,
-                    datasets[-1]["coordinateTransformations"][1]["translation"][2] + 0.5 * prev_sp[0],
-                    datasets[-1]["coordinateTransformations"][1]["translation"][3] + 0.5 * prev_sp[1],
+                    datasets[-1]["coordinateTransformations"][1]["translation"][2]
+                    + 0.5 * prev_sp[0],
+                    datasets[-1]["coordinateTransformations"][1]["translation"][3]
+                    + 0.5 * prev_sp[1],
                 ]
-            datasets.append({
-                "path": f"scale{lvl}/{dataset_name}",
-                "coordinateTransformations": [
-                    {"type": "scale", "scale": scale},
-                    {"type": "translation", "translation": translation},
-                ],
-            })
+            datasets.append(
+                {
+                    "path": f"scale{lvl}/{dataset_name}",
+                    "coordinateTransformations": [
+                        {"type": "scale", "scale": scale},
+                        {"type": "translation", "translation": translation},
+                    ],
+                }
+            )
             prev_sp = spatial
 
         mult = {
@@ -1132,20 +1116,19 @@ class TileFusion:
             self.refine_tile_positions_with_cross_correlation(
                 downsample_factors=self.downsample_factors,
                 ch_idx=self.channel_to_use,
-                threshold=self.threshold
+                threshold=self.threshold,
             )
             self.save_pairwise_metrics(metrics_path)
             print(f"Saved {len(self.pairwise_metrics)} pairwise metrics to {metrics_path}")
 
         if len(self.pairwise_metrics) == 0:
-            print("No overlapping tile pairs found for registration. Using stage positions directly.")
+            print(
+                "No overlapping tile pairs found for registration. Using stage positions directly."
+            )
         else:
             print("Optimizing global tile positions...")
         self.optimize_shifts(
-            method="TWO_ROUND_ITERATIVE",
-            rel_thresh=0.5,
-            abs_thresh=2.0,
-            iterative=True
+            method="TWO_ROUND_ITERATIVE", rel_thresh=0.5, abs_thresh=2.0, iterative=True
         )
         gc.collect()
         if USING_GPU and cp is not None:
@@ -1182,15 +1165,14 @@ class TileFusion:
 
         print("Building multiscale pyramid...")
         self._create_multiscales(omezarr, factors=self.multiscale_factors)
-        self._generate_ngff_zarr3_json(
-            omezarr, resolution_multiples=self.resolution_multiples
-        )
+        self._generate_ngff_zarr3_json(omezarr, resolution_multiples=self.resolution_multiples)
 
         print(f"Fusion complete! Output: {omezarr}")
 
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) > 1:
         tiff_path = sys.argv[1]
     else:

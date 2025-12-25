@@ -462,9 +462,9 @@ class TileFusion:
         return prof
 
     def _read_tile(self, tile_idx: int) -> np.ndarray:
-        """Read a single tile from the input data."""
+        """Read a single tile from the input data (all channels)."""
         if self._is_squid_format:
-            return self._read_squid_tile(tile_idx)
+            return self._read_squid_tile_all_channels(tile_idx)
         else:
             with tifffile.TiffFile(self.tiff_path) as tif:
                 arr = tif.series[tile_idx].asarray()
@@ -474,8 +474,24 @@ class TileFusion:
             arr = np.flip(arr, axis=-2)
             return arr.astype(np.float32)
 
+    def _read_squid_tile_all_channels(self, tile_idx: int) -> np.ndarray:
+        """Read all channels of a tile from SQUID folder format."""
+        fov = self._squid_fov_indices[tile_idx]
+        
+        channels = []
+        for channel_name in self._squid_channels:
+            img_path = self._squid_image_folder / f"manual_{fov}_0_{channel_name}.tiff"
+            if not img_path.exists():
+                img_path = self._squid_image_folder / f"manual_{fov}_0_{channel_name}.tif"
+            arr = tifffile.imread(img_path)
+            channels.append(arr)
+        
+        # Stack channels: (C, Y, X)
+        stacked = np.stack(channels, axis=0)
+        return stacked.astype(np.float32)
+
     def _read_squid_tile(self, tile_idx: int, channel_idx: int = None) -> np.ndarray:
-        """Read a tile from SQUID folder format."""
+        """Read a single channel of a tile from SQUID folder format."""
         if channel_idx is None:
             channel_idx = self.channel_to_use
         
@@ -930,7 +946,13 @@ class TileFusion:
 
             for t_idx in trange(len(offsets), desc="fusing", leave=True):
                 oy, ox = offsets[t_idx]
-                tile = self._read_tile(t_idx)
+                tile_all = self._read_tile(t_idx)
+                
+                # Extract the current channel
+                if tile_all.shape[0] > 1:
+                    tile = tile_all[c:c+1, :, :]  # (1, Y, X)
+                else:
+                    tile = tile_all  # Single channel, use as-is
 
                 wy = self.y_profile
                 wx = self.x_profile

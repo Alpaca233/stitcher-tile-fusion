@@ -297,10 +297,24 @@ class TileFusion:
             else self.tiff_path.parent / f"{self.tiff_path.stem}_fused.ome.zarr"
         )
 
-        # Detect format: folder (SQUID) vs file (OME-TIFF)
-        self._is_squid_format = self.tiff_path.is_dir()
-        if self._is_squid_format:
-            self._load_squid_metadata()
+        # Detect format: Zarr, SQUID folder, or OME-TIFF file
+        self._is_zarr_format = False
+        self._is_squid_format = False
+        if self.tiff_path.is_dir():
+            # Check if it's a Zarr store (has zarr.json with per_index_metadata)
+            zarr_json = self.tiff_path / "zarr.json"
+            if zarr_json.exists():
+                with open(zarr_json) as f:
+                    meta = json.load(f)
+                if "attributes" in meta and "per_index_metadata" in meta.get("attributes", {}):
+                    self._is_zarr_format = True
+                    self._load_zarr_metadata()
+                else:
+                    self._is_squid_format = True
+                    self._load_squid_metadata()
+            else:
+                self._is_squid_format = True
+                self._load_squid_metadata()
         else:
             self._load_ome_tiff_metadata()
 
@@ -443,6 +457,60 @@ class TileFusion:
         # Store FOV indices for reading tiles
         self._squid_fov_indices = self._squid_coords["fov"].tolist()
 
+    def _load_zarr_metadata(self) -> None:
+        """Load metadata from Zarr format with per_index_metadata."""
+        zarr_json = self.tiff_path / "zarr.json"
+        with open(zarr_json) as f:
+            meta = json.load(f)
+
+        attrs = meta.get("attributes", {})
+        per_index_meta = attrs.get("per_index_metadata", {})
+        voxel_size = attrs.get("deskewed_voxel_size_um", [1.0, 1.0, 1.0])
+
+        # Open tensorstore to get shape
+        spec = {
+            "driver": "zarr3",
+            "kvstore": {"driver": "file", "path": str(self.tiff_path)},
+        }
+        self._zarr_ts = ts.open(spec, create=False, open=True).result()
+        shape = self._zarr_ts.shape
+
+        # Shape is (T, P, C, Z, Y, X) for 3D or (T, P, C, Y, X) for 2D
+        if len(shape) == 6:
+            self.time_dim, self.position_dim, self.channels, z_dim, self.Y, self.X = shape
+            self._zarr_is_3d = True
+            self._pixel_size = (voxel_size[1], voxel_size[2])  # y, x from z,y,x
+        elif len(shape) == 5:
+            self.time_dim, self.position_dim, self.channels, self.Y, self.X = shape
+            self._zarr_is_3d = False
+            # voxel_size could be [z,y,x] or [y,x]
+            if len(voxel_size) == 3:
+                self._pixel_size = (voxel_size[1], voxel_size[2])
+            else:
+                self._pixel_size = (voxel_size[0], voxel_size[1])
+        else:
+            raise ValueError(f"Unsupported Zarr data rank {len(shape)}; expected 5 or 6.")
+
+        self.n_tiles = self.position_dim
+        self.n_series = self.n_tiles
+
+        # Extract tile positions from per_index_metadata
+        # Format: per_index_metadata[t][p]["0"]["stage_position"] = [z, y, x]
+        self._tile_positions = []
+        t_meta = per_index_meta.get("0", {})
+        for p in range(self.position_dim):
+            p_meta = t_meta.get(str(p), {})
+            z_meta = p_meta.get("0", {})
+            stage_pos = z_meta.get("stage_position", [0.0, 0.0, 0.0])
+            # stage_position is [z, y, x], we need (y, x)
+            if len(stage_pos) == 3:
+                self._tile_positions.append((stage_pos[1], stage_pos[2]))
+            else:
+                self._tile_positions.append((stage_pos[0], stage_pos[1]))
+
+        # Store channel names if available
+        self._zarr_channels = attrs.get("channels", [f"ch{i}" for i in range(self.channels)])
+
     @property
     def tile_positions(self) -> List[Tuple[float, float]]:
         """Stage positions for each tile (y, x)."""
@@ -530,7 +598,9 @@ class TileFusion:
 
     def _read_tile(self, tile_idx: int) -> np.ndarray:
         """Read a single tile from the input data (all channels)."""
-        if self._is_squid_format:
+        if self._is_zarr_format:
+            return self._read_zarr_tile_all_channels(tile_idx)
+        elif self._is_squid_format:
             return self._read_squid_tile_all_channels(tile_idx)
         else:
             with tifffile.TiffFile(self.tiff_path) as tif:
@@ -540,6 +610,31 @@ class TileFusion:
             # Flip along Y axis to correct orientation
             arr = np.flip(arr, axis=-2)
             return arr.astype(np.float32)
+
+    def _read_zarr_tile_all_channels(self, tile_idx: int) -> np.ndarray:
+        """Read all channels of a tile from Zarr format."""
+        # Shape: (T, P, C, Y, X) for 2D or (T, P, C, Z, Y, X) for 3D
+        if self._zarr_is_3d:
+            # For 3D, take max projection along Z
+            arr = self._zarr_ts[0, tile_idx, :, :, :, :].read().result()  # (C, Z, Y, X)
+            arr = np.max(arr, axis=1)  # Max projection -> (C, Y, X)
+        else:
+            arr = self._zarr_ts[0, tile_idx, :, :, :].read().result()  # (C, Y, X)
+        return arr.astype(np.float32)
+
+    def _read_zarr_tile(self, tile_idx: int, channel_idx: int = None) -> np.ndarray:
+        """Read a single channel of a tile from Zarr format."""
+        if channel_idx is None:
+            channel_idx = self.channel_to_use
+
+        if self._zarr_is_3d:
+            arr = self._zarr_ts[0, tile_idx, channel_idx, :, :, :].read().result()  # (Z, Y, X)
+            arr = np.max(arr, axis=0)  # Max projection -> (Y, X)
+            arr = arr[np.newaxis, :, :]  # Add channel dim
+        else:
+            arr = self._zarr_ts[0, tile_idx, channel_idx, :, :].read().result()  # (Y, X)
+            arr = arr[np.newaxis, :, :]  # Add channel dim
+        return arr.astype(np.float32)
 
     def _read_squid_tile_all_channels(self, tile_idx: int) -> np.ndarray:
         """Read all channels of a tile from SQUID folder format."""
@@ -581,7 +676,10 @@ class TileFusion:
         x_slice: slice,
     ) -> np.ndarray:
         """Read a region of a tile from the input data."""
-        if self._is_squid_format:
+        if self._is_zarr_format:
+            arr = self._read_zarr_tile(tile_idx)
+            return arr[:, y_slice, x_slice]
+        elif self._is_squid_format:
             arr = self._read_squid_tile(tile_idx)
             return arr[:, y_slice, x_slice]
         else:

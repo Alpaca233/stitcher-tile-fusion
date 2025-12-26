@@ -722,9 +722,22 @@ class TileFusion:
         th: float,
         max_shift: Tuple[int, int],
     ) -> None:
-        """Register tile pairs using parallel processing (CPU mode)."""
+        """Register tile pairs using parallel processing with batching (CPU mode)."""
+        import psutil
 
-        # Step 1: Read all patches in parallel using threads (I/O bound)
+        # Calculate batch size based on available RAM and tile size
+        available_ram = psutil.virtual_memory().available
+        patch_size_est = self.Y * self.X * 4 * 2  # float32, 2 patches per pair
+        max_pairs_in_memory = int(available_ram * 0.3 / patch_size_est)
+        batch_size = max(16, max_pairs_in_memory)  # Minimum 16 to keep threads busy
+
+        n_pairs = len(pair_bounds)
+        n_batches = (n_pairs + batch_size - 1) // batch_size
+        n_workers = min(cpu_count(), batch_size, 8)
+
+        if n_batches > 1:
+            print(f"Processing {n_pairs} pairs in {n_batches} batches (batch_size={batch_size})")
+
         def read_pair_patches(args):
             i_pos, j_pos, bounds_i_y, bounds_i_x, bounds_j_y, bounds_j_x = args
             try:
@@ -738,37 +751,41 @@ class TileFusion:
             except Exception:
                 return (i_pos, j_pos, None, None)
 
-        print(f"Reading {len(pair_bounds)} patch pairs...")
-        with ThreadPoolExecutor(max_workers=8) as io_executor:
-            patches = list(io_executor.map(read_pair_patches, pair_bounds))
+        # Process in batches to limit memory usage
+        for batch_idx in range(n_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, n_pairs)
+            batch = pair_bounds[start:end]
 
-        # Filter out failed reads
-        valid_patches = [(i, j, pi, pj) for i, j, pi, pj in patches if pi is not None]
+            # Read this batch's patches
+            with ThreadPoolExecutor(max_workers=8) as io_executor:
+                patches = list(io_executor.map(read_pair_patches, batch))
 
-        # Step 2: Register pairs in parallel using threads
-        # ThreadPoolExecutor works well because numpy/scipy release the GIL
-        work_items = [
-            (i_pos, j_pos, patch_i, patch_j, df, sw, th, max_shift)
-            for i_pos, j_pos, patch_i, patch_j in valid_patches
-        ]
+            # Filter and prepare work items
+            work_items = [
+                (i, j, pi, pj, df, sw, th, max_shift) for i, j, pi, pj in patches if pi is not None
+            ]
 
-        n_workers = min(cpu_count(), len(work_items), 8)
-        print(f"Registering {len(work_items)} pairs with {n_workers} threads...")
-
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            results = list(
-                tqdm(
-                    executor.map(_register_pair_worker, work_items),
-                    total=len(work_items),
-                    desc="register",
-                    leave=True,
+            # Register this batch
+            desc = f"register {batch_idx+1}/{n_batches}" if n_batches > 1 else "register"
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                results = list(
+                    tqdm(
+                        executor.map(_register_pair_worker, work_items),
+                        total=len(work_items),
+                        desc=desc,
+                        leave=True,
+                    )
                 )
-            )
 
-        # Collect results
-        for i_pos, j_pos, dy_s, dx_s, score in results:
-            if dy_s is not None:
-                self.pairwise_metrics[(i_pos, j_pos)] = (dy_s, dx_s, score)
+            # Collect results
+            for i_pos, j_pos, dy_s, dx_s, score in results:
+                if dy_s is not None:
+                    self.pairwise_metrics[(i_pos, j_pos)] = (dy_s, dx_s, score)
+
+            # Free memory
+            del patches, work_items, results
+            gc.collect()
 
     def _register_sequential(
         self,

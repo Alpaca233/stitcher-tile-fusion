@@ -6,7 +6,7 @@ Reads folder format with individual TIFF files per tile/channel and coordinates.
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -142,7 +142,7 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
     first_img = tifffile.imread(first_img_path)
     Y, X = first_img.shape[-2:]
 
-    # Load pixel size from acquisition parameters
+    # Load pixel size and z/t dimensions from acquisition parameters
     params_path = folder_path / "acquisition parameters.json"
     if params_path.exists():
         with open(params_path) as f:
@@ -150,44 +150,74 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
         magnification = params.get("objective", {}).get("magnification", 10.0)
         sensor_pixel_um = params.get("sensor_pixel_size_um", 7.52)
         pixel_size_um = sensor_pixel_um / magnification
+        n_z = params.get("Nz", 1)
+        n_t = params.get("Nt", 1)
+        dz_um = params.get("dz(um)", 1.0)
     else:
         pixel_size_um = 0.752  # Default for 10x
+        n_z = 1
+        n_t = 1
+        dz_um = 1.0
 
     pixel_size = (pixel_size_um, pixel_size_um)
 
+    # Build list of time folders if n_t > 1
+    if n_t > 1:
+        time_folders = [folder_path / str(t) for t in range(n_t)]
+    else:
+        time_folders = [image_folder]
+
     # Convert mm coordinates to µm and store as (y, x)
+    # For z-stacks, filter to z_level=0 to get unique FOV positions
     tile_positions = []
-    for _, row in coords.iterrows():
-        x_um = row["x (mm)"] * 1000
-        y_um = row["y (mm)"] * 1000
-        tile_positions.append((y_um, x_um))
+    unique_tile_identifiers = []
+
+    for idx, row in coords.iterrows():
+        # Get z_level, default to 0 if not present
+        z_level = row.get("z_level", 0) if "z_level" in coords.columns else 0
+
+        # Only include first z-level for each FOV
+        if z_level == 0:
+            x_um = row["x (mm)"] * 1000
+            y_um = row["y (mm)"] * 1000
+            tile_positions.append((y_um, x_um))
+            unique_tile_identifiers.append(tile_identifiers[idx])
+
+    # Update n_tiles to unique FOV count
+    n_unique_tiles = len(tile_positions)
 
     return {
-        "n_tiles": n_tiles,
-        "n_series": n_tiles,
+        "n_tiles": n_unique_tiles,
+        "n_series": n_unique_tiles,
         "shape": (Y, X),
         "channels": channels,
         "channel_names": channel_names,
-        "time_dim": 1,
-        "position_dim": n_tiles,
+        "n_z": n_z,
+        "n_t": n_t,
+        "dz_um": dz_um,
+        "time_dim": n_t,
+        "position_dim": n_unique_tiles,
         "pixel_size": pixel_size,
         "tile_positions": tile_positions,
-        "tile_identifiers": tile_identifiers,
+        "tile_identifiers": unique_tile_identifiers,
         "image_folder": image_folder,
+        "time_folders": time_folders,
         "pattern": pattern,
     }
 
 
-def _get_tile_filename(image_folder: Path, tile_id: tuple, channel_name: str) -> Path:
+def _get_tile_filename(
+    image_folder: Path, tile_id: tuple, channel_name: str, z_level: int = 0
+) -> Path:
     """Get the TIFF filename for a tile based on its identifier."""
     if len(tile_id) == 2:
         # Region-based format: (region, fov)
         region, fov = tile_id
-        img_path = image_folder / f"{region}_{fov}_0_{channel_name}.tiff"
+        img_path = image_folder / f"{region}_{fov}_{z_level}_{channel_name}.tiff"
     else:
         # Manual format: (fov,)
         fov = tile_id[0]
-        img_path = image_folder / f"manual_{fov}_0_{channel_name}.tiff"
+        img_path = image_folder / f"manual_{fov}_{z_level}_{channel_name}.tiff"
 
     if not img_path.exists():
         img_path = img_path.with_suffix(".tif")
@@ -199,6 +229,9 @@ def read_individual_tiffs_tile(
     channel_names: List[str],
     tile_identifiers: List[tuple],
     tile_idx: int,
+    z_level: int = 0,
+    time_idx: int = 0,
+    time_folders: Optional[List[Path]] = None,
 ) -> np.ndarray:
     """
     Read all channels of a tile from individual TIFFs folder format.
@@ -206,13 +239,19 @@ def read_individual_tiffs_tile(
     Parameters
     ----------
     image_folder : Path
-        Path to folder containing TIFF files.
+        Path to folder containing TIFF files (used if time_folders is None).
     channel_names : list of str
         Channel names.
     tile_identifiers : list of tuple
         Tile identifiers: (well, fov) or (fov,) tuples.
     tile_idx : int
         Index of the tile.
+    z_level : int
+        Z-level index (default 0).
+    time_idx : int
+        Time point index (default 0).
+    time_folders : list of Path, optional
+        List of folders for each time point.
 
     Returns
     -------
@@ -221,9 +260,15 @@ def read_individual_tiffs_tile(
     """
     tile_id = tile_identifiers[tile_idx]
 
+    # Determine which folder to read from
+    if time_folders is not None and len(time_folders) > 1:
+        folder = time_folders[time_idx]
+    else:
+        folder = image_folder
+
     channels = []
     for channel_name in channel_names:
-        img_path = _get_tile_filename(image_folder, tile_id, channel_name)
+        img_path = _get_tile_filename(folder, tile_id, channel_name, z_level)
         arr = tifffile.imread(img_path)
         channels.append(arr)
 
@@ -239,6 +284,9 @@ def read_individual_tiffs_region(
     y_slice: slice,
     x_slice: slice,
     channel_idx: int = 0,
+    z_level: int = 0,
+    time_idx: int = 0,
+    time_folders: Optional[List[Path]] = None,
 ) -> np.ndarray:
     """
     Read a region of a single channel from individual TIFFs format.
@@ -246,7 +294,7 @@ def read_individual_tiffs_region(
     Parameters
     ----------
     image_folder : Path
-        Path to folder containing TIFF files.
+        Path to folder containing TIFF files (used if time_folders is None).
     channel_names : list of str
         Channel names.
     tile_identifiers : list of tuple
@@ -257,6 +305,12 @@ def read_individual_tiffs_region(
         Region to read.
     channel_idx : int
         Channel index.
+    z_level : int
+        Z-level index (default 0).
+    time_idx : int
+        Time point index (default 0).
+    time_folders : list of Path, optional
+        List of folders for each time point.
 
     Returns
     -------
@@ -266,7 +320,13 @@ def read_individual_tiffs_region(
     tile_id = tile_identifiers[tile_idx]
     channel_name = channel_names[channel_idx]
 
-    img_path = _get_tile_filename(image_folder, tile_id, channel_name)
+    # Determine which folder to read from
+    if time_folders is not None and len(time_folders) > 1:
+        folder = time_folders[time_idx]
+    else:
+        folder = image_folder
+
+    img_path = _get_tile_filename(folder, tile_id, channel_name, z_level)
 
     arr = tifffile.imread(img_path)
     if arr.ndim == 2:

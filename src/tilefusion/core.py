@@ -144,6 +144,13 @@ class TileFusion:
         self._pixel_size = self._metadata["pixel_size"]
         self._tile_positions = self._metadata["tile_positions"]
 
+        # Z-stack and time series properties
+        self.n_z = self._metadata.get("n_z", 1)
+        self.n_t = self._metadata.get("n_t", 1)
+        self.dz_um = self._metadata.get("dz_um", 1.0)
+        self._time_folders = self._metadata.get("time_folders", None)
+        self._middle_z = self.n_z // 2  # Use middle z-level for registration
+
         # Configuration
         self.downsample_factors = tuple(downsample_factors)
         self.ssim_window = int(ssim_window)
@@ -248,8 +255,13 @@ class TileFusion:
     # I/O methods (delegate to format-specific loaders)
     # -------------------------------------------------------------------------
 
-    def _read_tile(self, tile_idx: int) -> np.ndarray:
+    def _read_tile(
+        self, tile_idx: int, z_level: int = None, time_idx: int = 0
+    ) -> np.ndarray:
         """Read a single tile from the input data (all channels)."""
+        if z_level is None:
+            z_level = self._middle_z  # Default to middle z for registration
+
         if self._is_zarr_format:
             zarr_ts = self._metadata["tensorstore"]
             is_3d = self._metadata.get("is_3d", False)
@@ -260,6 +272,9 @@ class TileFusion:
                 self._metadata["channel_names"],
                 self._metadata["tile_identifiers"],
                 tile_idx,
+                z_level=z_level,
+                time_idx=time_idx,
+                time_folders=self._time_folders,
             )
         else:
             return read_ome_tiff_tile(self.tiff_path, tile_idx)
@@ -269,8 +284,13 @@ class TileFusion:
         tile_idx: int,
         y_slice: slice,
         x_slice: slice,
+        z_level: int = None,
+        time_idx: int = 0,
     ) -> np.ndarray:
         """Read a region of a tile from the input data."""
+        if z_level is None:
+            z_level = self._middle_z  # Default to middle z for registration
+
         if self._is_zarr_format:
             zarr_ts = self._metadata["tensorstore"]
             is_3d = self._metadata.get("is_3d", False)
@@ -284,6 +304,9 @@ class TileFusion:
                 y_slice,
                 x_slice,
                 self.channel_to_use,
+                z_level=z_level,
+                time_idx=time_idx,
+                time_folders=self._time_folders,
             )
         else:
             return read_ome_tiff_region(self.tiff_path, tile_idx, y_slice, x_slice)
@@ -549,9 +572,10 @@ class TileFusion:
     def _create_fused_tensorstore(self, output_path: Union[str, Path]) -> None:
         """Create the output Zarr v3 store for the fused image."""
         out = Path(output_path)
-        full_shape = [1, self.channels, *self.padded_shape]
-        shard_chunk = [1, 1, self.chunk_y * 2, self.chunk_x * 2]
-        codec_chunk = [1, 1, self.chunk_y, self.chunk_x]
+        # 5D shape: (T, C, Z, Y, X)
+        full_shape = [self.n_t, self.channels, self.n_z, *self.padded_shape]
+        shard_chunk = [1, 1, 1, self.chunk_y * 2, self.chunk_x * 2]
+        codec_chunk = [1, 1, 1, self.chunk_y, self.chunk_x]
         self.shard_chunk = shard_chunk
 
         self.fused_ts = create_zarr_store(
@@ -565,15 +589,25 @@ class TileFusion:
     def _fuse_tiles(
         self, mode: str = "blended", chunked: bool = True, ram_fraction: float = 0.4
     ) -> None:
-        """Fuse all tiles into output."""
-        if mode == "direct":
-            return self._fuse_tiles_direct()
-        if chunked:
-            return self._fuse_tiles_chunked(ram_fraction)
-        return self._fuse_tiles_full()
+        """Fuse all tiles into output, looping over z-levels and time points."""
+        total_planes = self.n_t * self.n_z
+        plane_idx = 0
 
-    def _fuse_tiles_direct(self) -> None:
-        """Fuse tiles using direct placement (fast mode, no blending)."""
+        for t in range(self.n_t):
+            for z in range(self.n_z):
+                plane_idx += 1
+                if total_planes > 1:
+                    print(f"Fusing plane {plane_idx}/{total_planes} (t={t}, z={z})...")
+
+                if mode == "direct":
+                    self._fuse_tiles_direct_plane(z_level=z, time_idx=t)
+                elif chunked:
+                    self._fuse_tiles_chunked_plane(z_level=z, time_idx=t, ram_fraction=ram_fraction)
+                else:
+                    self._fuse_tiles_full_plane(z_level=z, time_idx=t)
+
+    def _fuse_tiles_direct_plane(self, z_level: int = 0, time_idx: int = 0) -> None:
+        """Fuse tiles using direct placement for a single z/t plane."""
         import psutil
 
         offsets = [
@@ -589,13 +623,17 @@ class TileFusion:
         output_bytes = pad_Y * pad_X * self.channels * 2
         use_memory = output_bytes < 0.45 * available_ram
 
-        if use_memory:
-            print(f"Direct mode: using in-memory buffer ({output_bytes / 1e9:.2f} GB)")
-            output = np.zeros((1, self.channels, pad_Y, pad_X), dtype=np.uint16)
+        show_progress = self.n_t == 1 and self.n_z == 1  # Only show progress for single plane
 
-            for t_idx in trange(len(offsets), desc="placing tiles", leave=True):
+        if use_memory:
+            if show_progress:
+                print(f"Direct mode: using in-memory buffer ({output_bytes / 1e9:.2f} GB)")
+            output = np.zeros((1, self.channels, 1, pad_Y, pad_X), dtype=np.uint16)
+
+            iterator = trange(len(offsets), desc="placing tiles", leave=True) if show_progress else range(len(offsets))
+            for t_idx in iterator:
                 oy, ox = offsets[t_idx]
-                tile_all = self._read_tile(t_idx)
+                tile_all = self._read_tile(t_idx, z_level=z_level, time_idx=time_idx)
 
                 y_end = min(oy + self.Y, pad_Y)
                 x_end = min(ox + self.X, pad_X)
@@ -603,16 +641,21 @@ class TileFusion:
                 tile_w = x_end - ox
 
                 if tile_h > 0 and tile_w > 0:
-                    output[0, :, oy:y_end, ox:x_end] = tile_all[:, :tile_h, :tile_w]
+                    output[0, :, 0, oy:y_end, ox:x_end] = tile_all[:, :tile_h, :tile_w]
 
-            print("Writing to disk...")
-            self.fused_ts[:].write(output).result()
+            if show_progress:
+                print("Writing to disk...")
+            self.fused_ts[time_idx : time_idx + 1, :, z_level : z_level + 1, :, :].write(
+                output
+            ).result()
             del output
         else:
-            print(f"Direct mode: writing directly to disk")
-            for t_idx in trange(len(offsets), desc="placing tiles", leave=True):
+            if show_progress:
+                print(f"Direct mode: writing directly to disk")
+            iterator = trange(len(offsets), desc="placing tiles", leave=True) if show_progress else range(len(offsets))
+            for t_idx in iterator:
                 oy, ox = offsets[t_idx]
-                tile_all = self._read_tile(t_idx)
+                tile_all = self._read_tile(t_idx, z_level=z_level, time_idx=time_idx)
 
                 y_end = min(oy + self.Y, pad_Y)
                 x_end = min(ox + self.X, pad_X)
@@ -621,14 +664,15 @@ class TileFusion:
 
                 if tile_h > 0 and tile_w > 0:
                     tile_region = tile_all[:, :tile_h, :tile_w].astype(np.uint16)
-                    self.fused_ts[0:1, :, oy:y_end, ox:x_end].write(
-                        tile_region[np.newaxis, ...]
-                    ).result()
+                    # Shape: (1, C, 1, h, w)
+                    self.fused_ts[
+                        time_idx : time_idx + 1, :, z_level : z_level + 1, oy:y_end, ox:x_end
+                    ].write(tile_region[np.newaxis, :, np.newaxis, :, :]).result()
 
         gc.collect()
 
-    def _fuse_tiles_full(self) -> None:
-        """Fuse all tiles using full-image accumulator."""
+    def _fuse_tiles_full_plane(self, z_level: int = 0, time_idx: int = 0) -> None:
+        """Fuse all tiles using full-image accumulator for a single z/t plane."""
         offsets = [
             (
                 int((y - self.offset[0]) / self._pixel_size[0]),
@@ -643,9 +687,12 @@ class TileFusion:
         weight_sum = np.zeros_like(fused_block)
         w2d = self.y_profile[:, None] * self.x_profile[None, :]
 
-        for t_idx in trange(len(offsets), desc="fusing", leave=True):
+        show_progress = self.n_t == 1 and self.n_z == 1
+        iterator = trange(len(offsets), desc="fusing", leave=True) if show_progress else range(len(offsets))
+
+        for t_idx in iterator:
             oy, ox = offsets[t_idx]
-            tile_all = self._read_tile(t_idx)
+            tile_all = self._read_tile(t_idx, z_level=z_level, time_idx=time_idx)
 
             if tile_all.shape[0] == 1 and C > 1:
                 tile_all = np.broadcast_to(tile_all, (C, tile_all.shape[1], tile_all.shape[2]))
@@ -653,7 +700,10 @@ class TileFusion:
             accumulate_tile_shard(fused_block, weight_sum, tile_all, w2d, oy, ox)
 
         normalize_shard(fused_block, weight_sum)
-        self.fused_ts[0, :, :pad_Y, :pad_X].write(fused_block.astype(np.uint16)).result()
+        # Write to 5D output: (T, C, Z, Y, X)
+        self.fused_ts[time_idx, :, z_level, :pad_Y, :pad_X].write(
+            fused_block.astype(np.uint16)
+        ).result()
 
         del fused_block, weight_sum
         gc.collect()
@@ -661,8 +711,10 @@ class TileFusion:
             cp.get_default_memory_pool().free_all_blocks()
             cp.get_default_pinned_memory_pool().free_all_blocks()
 
-    def _fuse_tiles_chunked(self, ram_fraction: float = 0.4) -> None:
-        """Fuse tiles using memory-efficient chunked processing."""
+    def _fuse_tiles_chunked_plane(
+        self, z_level: int = 0, time_idx: int = 0, ram_fraction: float = 0.4
+    ) -> None:
+        """Fuse tiles using memory-efficient chunked processing for a single z/t plane."""
         import psutil
 
         available_ram = psutil.virtual_memory().available
@@ -677,10 +729,13 @@ class TileFusion:
         pad_Y, pad_X = self.padded_shape
 
         if block_size >= max(pad_Y, pad_X):
-            print(f"Image fits in RAM budget, using full mode")
-            return self._fuse_tiles_full()
+            if self.n_t == 1 and self.n_z == 1:
+                print(f"Image fits in RAM budget, using full mode")
+            return self._fuse_tiles_full_plane(z_level=z_level, time_idx=time_idx)
 
-        print(f"Using chunked mode: {block_size}×{block_size} blocks")
+        show_progress = self.n_t == 1 and self.n_z == 1
+        if show_progress:
+            print(f"Using chunked mode: {block_size}x{block_size} blocks")
 
         tile_bounds = []
         for y, x in self._tile_positions:
@@ -713,8 +768,9 @@ class TileFusion:
                 weight_sum = np.zeros_like(fused_block)
 
                 desc = f"block {block_idx}/{total_blocks}"
-                for t_idx in tqdm(overlapping, desc=desc, leave=False):
-                    tile_all = self._read_tile(t_idx)
+                iterator = tqdm(overlapping, desc=desc, leave=False) if show_progress else overlapping
+                for t_idx in iterator:
+                    tile_all = self._read_tile(t_idx, z_level=z_level, time_idx=time_idx)
 
                     if tile_all.shape[0] == 1 and C > 1:
                         tile_all = np.broadcast_to(
@@ -742,7 +798,8 @@ class TileFusion:
                 mask = weight_sum > 0
                 fused_block[mask] /= weight_sum[mask]
 
-                self.fused_ts[0, :, block_y:by_end, block_x:bx_end].write(
+                # Write to 5D output: (T, C, Z, Y, X)
+                self.fused_ts[time_idx, :, z_level, block_y:by_end, block_x:bx_end].write(
                     fused_block.astype(np.uint16)
                 ).result()
 
@@ -762,7 +819,7 @@ class TileFusion:
         omezarr_path: Path,
         factors: Sequence[int] = (2, 4, 8),
     ) -> None:
-        """Build NGFF multiscales by downsampling Y/X iteratively."""
+        """Build NGFF multiscales by downsampling Y/X iteratively (not Z or T)."""
         inp = None
         for idx, factor in enumerate(factors):
             out_path = omezarr_path / f"scale{idx + 1}" / "image"
@@ -774,7 +831,8 @@ class TileFusion:
             ).result()
 
             factor_to_use = factors[idx] // factors[idx - 1] if idx > 0 else factors[0]
-            _, _, Y, X = inp.shape
+            # 5D shape: (T, C, Z, Y, X)
+            _, _, _, Y, X = inp.shape
             new_y, new_x = Y // factor_to_use, X // factor_to_use
 
             chunk_y = min(1024, new_y)
@@ -794,12 +852,14 @@ class TileFusion:
                     in_x0 = x0 * factor_to_use
                     in_x1 = min(X, (x0 + bx) * factor_to_use)
 
-                    slab = inp[:, :, in_y0:in_y1, in_x0:in_x1].read().result()
+                    # Read 5D slab: (T, C, Z, h, w)
+                    slab = inp[:, :, :, in_y0:in_y1, in_x0:in_x1].read().result()
                     if self.multiscale_downsample == "stride":
                         down = slab[..., ::factor_to_use, ::factor_to_use]
                     else:
                         arr = xp.asarray(slab)
-                        block = (1, 1, factor_to_use, factor_to_use)
+                        # Only downsample Y, X (last 2 dims)
+                        block = (1, 1, 1, factor_to_use, factor_to_use)
                         down_arr = block_reduce(arr, block_size=block, func=xp.mean)
                         down = (
                             cp.asnumpy(down_arr)
@@ -807,7 +867,7 @@ class TileFusion:
                             else np.asarray(down_arr)
                         )
                     down = down.astype(slab.dtype, copy=False)
-                    self.fused_ts[:, :, y0 : y0 + by, x0 : x0 + bx].write(down).result()
+                    self.fused_ts[:, :, :, y0 : y0 + by, x0 : x0 + bx].write(down).result()
 
             write_scale_group_metadata(omezarr_path / f"scale{idx + 1}")
 
@@ -867,7 +927,13 @@ class TileFusion:
         print("Computing fused image space...")
         self._compute_fused_image_space()
         self._pad_to_chunk_multiple()
-        print(f"Output size: {self.padded_shape[0]} x {self.padded_shape[1]}")
+        if self.n_t > 1 or self.n_z > 1:
+            print(
+                f"Output size: {self.n_t}T x {self.channels}C x {self.n_z}Z x "
+                f"{self.padded_shape[0]} x {self.padded_shape[1]}"
+            )
+        else:
+            print(f"Output size: {self.padded_shape[0]} x {self.padded_shape[1]}")
 
         scale0 = self.output_path / "scale0" / "image"
         scale0.parent.mkdir(parents=True, exist_ok=True)

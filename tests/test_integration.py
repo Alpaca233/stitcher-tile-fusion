@@ -105,11 +105,11 @@ class TestTileFusionIntegration:
 
         # Read fused result
         fused = _read_fused_output(output_path)
-        assert fused.ndim == 4  # (T, C, Y, X)
+        assert fused.ndim == 5  # (T, C, Z, Y, X)
 
         # Verify dimensions are reasonable (padded to chunk multiples)
-        assert fused.shape[2] >= tile_size  # Y dimension
-        assert fused.shape[3] >= tile_size  # X dimension (at least one tile width)
+        assert fused.shape[3] >= tile_size  # Y dimension
+        assert fused.shape[4] >= tile_size  # X dimension (at least one tile width)
 
     def test_two_tiles_vertical(self, tmp_path):
         """Test fusion of two vertically adjacent tiles."""
@@ -143,7 +143,7 @@ class TestTileFusionIntegration:
 
         assert output_path.exists()
         fused = _read_fused_output(output_path)
-        assert fused.shape[3] >= tile_size  # X dimension (padded to chunk multiple)
+        assert fused.shape[4] >= tile_size  # X dimension (padded to chunk multiple)
 
     def test_four_tiles_grid(self, tmp_path):
         """Test fusion of 2x2 grid of tiles."""

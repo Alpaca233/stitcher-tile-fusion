@@ -229,7 +229,7 @@ def create_zarr_store(
                 }
             ],
             "data_type": "uint16",
-            "dimension_names": ["t", "c", "y", "x"],
+            "dimension_names": ["t", "c", "z", "y", "x"],
         },
     }
 
@@ -265,26 +265,29 @@ def write_ngff_metadata(
     axes = [
         {"name": "t", "type": "time"},
         {"name": "c", "type": "channel"},
+        {"name": "z", "type": "space"},
         {"name": "y", "type": "space"},
         {"name": "x", "type": "space"},
     ]
     norm_res = [tuple(r) if hasattr(r, "__len__") else (r, r) for r in resolution_multiples]
-    base_scale = [1.0, 1.0] + [float(s) for s in pixel_size]
-    trans = [0.0, 0.0] + list(center)
+    # 5D: (t, c, z, y, x) - z scale is 1.0 (no z downsampling)
+    base_scale = [1.0, 1.0, 1.0] + [float(s) for s in pixel_size]
+    trans = [0.0, 0.0, 0.0] + list(center)
 
     datasets = []
-    prev_sp = base_scale[2:]
+    prev_sp = base_scale[3:]  # Only y, x for previous spatial
     for lvl, factors in enumerate(norm_res):
-        spatial = [base_scale[i + 2] * factors[i] for i in range(2)]
-        scale = [1.0, 1.0] + spatial
+        spatial = [base_scale[i + 3] * factors[i] for i in range(2)]
+        scale = [1.0, 1.0, 1.0] + spatial  # t, c, z stay at 1.0
         if lvl == 0:
             translation = trans
         else:
             translation = [
                 0.0,
                 0.0,
-                datasets[-1]["coordinateTransformations"][1]["translation"][2] + 0.5 * prev_sp[0],
-                datasets[-1]["coordinateTransformations"][1]["translation"][3] + 0.5 * prev_sp[1],
+                0.0,  # z translation stays 0
+                datasets[-1]["coordinateTransformations"][1]["translation"][3] + 0.5 * prev_sp[0],
+                datasets[-1]["coordinateTransformations"][1]["translation"][4] + 0.5 * prev_sp[1],
             ]
         datasets.append(
             {
@@ -315,7 +318,7 @@ def write_ngff_metadata(
 def write_scale_group_metadata(scale_path: Path) -> None:
     """Write zarr.json for a scale group."""
     ngff = {
-        "attributes": {"_ARRAY_DIMENSIONS": ["t", "c", "y", "x"]},
+        "attributes": {"_ARRAY_DIMENSIONS": ["t", "c", "z", "y", "x"]},
         "zarr_format": 3,
         "node_type": "group",
     }

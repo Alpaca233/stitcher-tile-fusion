@@ -186,6 +186,16 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
     # Update n_tiles to unique FOV count
     n_unique_tiles = len(tile_positions)
 
+    # Extract unique regions (first element of tile identifier tuples)
+    unique_regions = []
+    if unique_tile_identifiers and len(unique_tile_identifiers[0]) == 2:
+        seen = set()
+        for tile_id in unique_tile_identifiers:
+            region = tile_id[0]
+            if region not in seen:
+                unique_regions.append(region)
+                seen.add(region)
+
     return {
         "n_tiles": n_unique_tiles,
         "n_series": n_unique_tiles,
@@ -200,6 +210,7 @@ def load_individual_tiffs_metadata(folder_path: Path) -> Dict[str, Any]:
         "pixel_size": pixel_size,
         "tile_positions": tile_positions,
         "tile_identifiers": unique_tile_identifiers,
+        "unique_regions": unique_regions,
         "image_folder": image_folder,
         "time_folders": time_folders,
         "pattern": pattern,

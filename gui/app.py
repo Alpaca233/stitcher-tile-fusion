@@ -1344,7 +1344,7 @@ class StitcherGUI(QMainWindow):
         try:
             from tilefusion import load_flatfield
 
-            self.flatfield, self.darkfield = load_flatfield(file_path)
+            self.flatfield, self.darkfield = load_flatfield(Path(file_path))
             n_channels = self.flatfield.shape[0]
             status = f"Loaded ({n_channels} channels)"
             if self.darkfield is not None:

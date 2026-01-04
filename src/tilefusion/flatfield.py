@@ -145,6 +145,7 @@ def apply_flatfield(
 
     # Convert to float32 to avoid underflow with unsigned integer types
     tile_f = tile.astype(np.float32)
+    # For flatfield values <= 1e-6, use 1.0 to avoid division by zero/near-zero
     flatfield_safe = np.where(flatfield > 1e-6, flatfield, 1.0).astype(np.float32)
 
     if darkfield is not None:
@@ -207,6 +208,7 @@ def apply_flatfield_region(
 
     # Convert to float32 to avoid underflow with unsigned integer types
     region_f = region.astype(np.float32)
+    # For flatfield values <= 1e-6, use 1.0 to avoid division by zero/near-zero
     ff_safe = np.where(ff_region > 1e-6, ff_region, 1.0).astype(np.float32)
 
     if df_region is not None:

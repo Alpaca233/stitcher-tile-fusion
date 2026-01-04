@@ -1227,10 +1227,19 @@ class StitcherGUI(QMainWindow):
         self.save_flatfield_button.setEnabled(False)
 
         # Auto-load existing flatfield if present, otherwise disable correction
-        flatfield_path = path.parent / f"{path.stem}_flatfield.npy"
+        # For directories (SQUID folders), also check inside the directory
+        if path.is_dir():
+            flatfield_path = path / f"{path.name}_flatfield.npy"
+            if not flatfield_path.exists():
+                # Fallback: check next to the directory
+                flatfield_path = path.parent / f"{path.name}_flatfield.npy"
+        else:
+            flatfield_path = path.parent / f"{path.stem}_flatfield.npy"
+
         if flatfield_path.exists():
             self.log(f"Found existing flatfield: {flatfield_path.name}")
             self.on_flatfield_dropped(str(flatfield_path))
+            self.flatfield_drop_area.setFile(str(flatfield_path))
         else:
             self.flatfield_checkbox.setChecked(False)
 
@@ -1346,6 +1355,7 @@ class StitcherGUI(QMainWindow):
             )
             self.view_flatfield_button.setEnabled(True)
             self.clear_flatfield_button.setEnabled(True)
+            self.save_flatfield_button.setEnabled(True)
             # Enable flatfield correction when successfully loaded
             self.flatfield_checkbox.setChecked(True)
             self.log(f"Loaded flatfield from {file_path}: {self.flatfield.shape}")
